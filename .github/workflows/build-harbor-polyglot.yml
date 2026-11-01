@@ -1,0 +1,89 @@
+name: build-harbor-polyglot-images
+# Language toolchain images for the tasks of Harbor's official `aider_polyglot` adapter (Harbor v0.18.0).
+# The adapter generates one Dockerfile per task; the part that installs the toolchain is identical for all tasks of a
+# language and only `COPY workspace/ ./` differs. So one image is built per language from the adapter's own generated
+# Dockerfile (unmodified; the build context has an empty workspace/), and the per-task files are delivered by Harbor's
+# documented prebuilt-image mechanism (environment/ uploaded into the working directory at start).
+# A thin extra layer pre-installs what Harbor's singularity environment would otherwise install at start with root
+# (python3, python3-venv, /opt/harbor-server venv with uvicorn + fastapi); tmux and asciinema come from the Dockerfile.
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/build-harbor-polyglot.yml"]
+permissions:
+  contents: read
+  packages: write
+env:
+  HARBOR_SHA: 527d50deb63a5d279e8c20593c18a2cbc7f61f9e       # harbor-framework/harbor, tag v0.18.0
+  EXERCISES_SHA: 7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f    # Aider-AI/polyglot-benchmark
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript, java, cpp, go, rust]
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af; df -h /
+      - uses: actions/checkout@v4
+        with: {repository: harbor-framework/harbor, ref: "${{ env.HARBOR_SHA }}", path: harbor}
+      - uses: actions/checkout@v4
+        with: {repository: Aider-AI/polyglot-benchmark, ref: "${{ env.EXERCISES_SHA }}", path: exercises}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - name: Generate the tasks with the official adapter
+        run: |
+          pip install -q typer rich pyyaml
+          PYTHONPATH=harbor/adapters/aider_polyglot/src python -m aider_polyglot.main \
+            --polyglot-root exercises --languages "${{ matrix.language }}" --output-dir tasks
+          echo "tasks: $(ls tasks | wc -l)"
+      - name: The toolchain part of the Dockerfile must be the same for every task of the language
+        run: |
+          # all Dockerfiles must be identical apart from nothing at all (the exercise-specific files come by COPY)
+          n=$(md5sum tasks/*/environment/Dockerfile | cut -d' ' -f1 | sort -u | wc -l)
+          echo "distinct Dockerfiles: $n"; [ "$n" = 1 ]
+          D=$(md5sum tasks/*/environment/Dockerfile | head -1 | cut -d' ' -f1)
+          DSHA=$(sha256sum "$(ls tasks/*/environment/Dockerfile | head -1)" | cut -c1-12)
+          echo "DSHA=$DSHA" >> "$GITHUB_ENV"
+          mkdir -p ctx/workspace; cp "$(ls tasks/*/environment/Dockerfile | head -1)" ctx/Dockerfile
+          cat ctx/Dockerfile
+      - name: Build the adapter Dockerfile (empty workspace)
+        run: docker build -t toolchain:local ctx
+      - name: Add the Harbor server prerequisites
+        run: |
+          cat > Dockerfile.server <<'D'
+          FROM toolchain:local
+          RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
+              && rm -rf /var/lib/apt/lists/*
+          RUN python3 -m venv /opt/harbor-server && /opt/harbor-server/bin/python3 -m pip install --no-cache-dir uvicorn fastapi \
+              && chmod -R a+rX /opt/harbor-server
+          D
+          docker build -f Dockerfile.server -t final:local \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.description="Toolchain image (${{ matrix.language }}) for Harbor aider_polyglot tasks, Harbor ${{ env.HARBOR_SHA }}, exercises ${{ env.EXERCISES_SHA }}" .
+      - name: Check as an unprivileged user
+        run: |
+          docker run --rm --user 12345 final:local bash -c '
+            set -e
+            command -v python3 tmux asciinema; python3 --version
+            /opt/harbor-server/bin/python3 -c "import uvicorn, fastapi; print(\"server deps ok\")"
+            case "${{ matrix.language }}" in
+              python) python3 -c "import sys; assert sys.version_info[:2]==(3,11)"; pip3 --version;;
+              javascript) node --version; jest --version;;
+              java) java -version; javac -version;;
+              cpp) g++ --version | head -1; cmake --version | head -1;;
+              go) /usr/local/go/bin/go version;;
+              rust) /root/.cargo/bin/rustc --version || true;;
+            esac'
+      - uses: docker/login-action@v3
+        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
+      - name: Push
+        run: |
+          IMG=ghcr.io/${{ github.repository_owner }}/rethink-harbor-polyglot:${{ matrix.language }}-${DSHA}
+          docker tag final:local "$IMG"; docker push "$IMG"
+          docker image inspect "$IMG" --format '{{.Size}}' | awk '{printf "size: %.2f GB\n", $1/1e9}'
+          echo "pushed $IMG"
