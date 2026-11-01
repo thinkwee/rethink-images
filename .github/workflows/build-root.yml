@@ -15,8 +15,6 @@ jobs:
       matrix:
         include:
           - {name: hyperagents, repo: facebookresearch/Hyperagents, sha: 59a68f672dfb92c74aeb7e61535d776fb36e172d}
-          - {name: dgm,         repo: jennyzzt/dgm,                 sha: a565fd2d1dca504ef5104a7cc0f3bdc4ab9b4fd2}
-          - {name: hgm,         repo: metauto-ai/HGM,               sha: 013872d95da978483f5b540e531db063d23890da}
     steps:
       - name: Free disk space (CUDA base images are large)
         run: |
@@ -25,6 +23,14 @@ jobs:
           df -h /
       - uses: actions/checkout@v4
         with: {repository: "${{ matrix.repo }}", ref: "${{ matrix.sha }}", path: src}
+      - name: Official pre-build step (Hyperagents setup_initial.sh, imo_proof section)
+        if: matrix.name == 'hyperagents'
+        working-directory: src
+        run: |
+          git config --global user.email "ci@example.com"; git config --global user.name "ci"
+          pip install -q GitPython python-dotenv || true
+          python -m domains.imo.setup_proofgrader_repo --proofautograder || (pip install -q -r requirements.txt && python -m domains.imo.setup_proofgrader_repo --proofautograder)
+          ls proofgrader_repo | head
       - uses: docker/login-action@v3
         with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
       - name: Build and push
