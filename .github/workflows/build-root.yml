@@ -1,0 +1,38 @@
+name: build-root-images
+# Build each system's top-level Dockerfile exactly as published, at a pinned commit.
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/build-root.yml"]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: hyperagents, repo: facebookresearch/Hyperagents, sha: 59a68f672dfb92c74aeb7e61535d776fb36e172d}
+          - {name: dgm,         repo: jennyzzt/dgm,                 sha: a565fd2d1dca504ef5104a7cc0f3bdc4ab9b4fd2}
+          - {name: hgm,         repo: metauto-ai/HGM,               sha: 013872d95da978483f5b540e531db063d23890da}
+    steps:
+      - name: Free disk space (CUDA base images are large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+      - uses: actions/checkout@v4
+        with: {repository: "${{ matrix.repo }}", ref: "${{ matrix.sha }}", path: src}
+      - uses: docker/login-action@v3
+        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
+      - name: Build and push
+        run: |
+          IMG=ghcr.io/${{ github.repository_owner }}/rethink-${{ matrix.name }}:${{ matrix.sha }}
+          docker build -t "$IMG" \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.revision=${{ matrix.sha }} \
+            --label org.opencontainers.image.description="Unmodified ${{ matrix.repo }} Dockerfile at ${{ matrix.sha }}" src
+          docker push "$IMG"
+          docker image inspect "$IMG" --format '{{.Size}}' | awk '{printf "size: %.2f GB\n", $1/1e9}'

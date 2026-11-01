@@ -1,0 +1,71 @@
+name: build-polyglot-images
+# Polyglot evaluation images (base, env, one per exercise) built with each project's own official
+# dataset-preparation script and build functions, unchanged. The prepared dataset (git repos whose commit
+# hashes the images refer to) is published as a release asset.
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/build-polyglot.yml", "scripts/build_polyglot.py"]
+permissions:
+  contents: write
+  packages: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: dgm,         repo: jennyzzt/dgm,                 sha: a565fd2d1dca504ef5104a7cc0f3bdc4ab9b4fd2, pkg: polyglot,         dir: polyglot}
+          - {name: hgm,         repo: metauto-ai/HGM,               sha: 013872d95da978483f5b540e531db063d23890da, pkg: polyglot,         dir: polyglot}
+          - {name: hyperagents, repo: facebookresearch/Hyperagents, sha: 59a68f672dfb92c74aeb7e61535d776fb36e172d, pkg: domains.polyglot, dir: domains/polyglot}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af; df -h /
+      - uses: actions/checkout@v4
+        with: {path: tools}
+      - uses: actions/checkout@v4
+        with: {repository: "${{ matrix.repo }}", ref: "${{ matrix.sha }}", path: src}
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.11"}
+      - name: Install (official instructions; SWE-bench pinned as in the official README)
+        working-directory: src
+        run: |
+          git config --global user.email "ci@example.com"; git config --global user.name "ci"
+          pip install docker GitPython unidiff rich tqdm python-dotenv chardet datasets
+          git clone https://github.com/princeton-nlp/SWE-bench.git /tmp/SWE-bench
+          git -C /tmp/SWE-bench checkout dc4c087c2b9e4cefebf2e3d201d27e36
+          pip install -e /tmp/SWE-bench
+      - name: Prepare dataset (official script)
+        working-directory: src
+        run: |
+          python -m ${{ matrix.pkg }}.prepare_polyglot_dataset
+          git -C ${{ matrix.dir }}/polyglot-benchmark rev-parse HEAD > ../benchmark_upstream_commit.txt || true
+      - name: Build images (official build functions)
+        working-directory: src
+        run: PYTHONPATH=. python ../tools/scripts/build_polyglot.py ${{ matrix.pkg }} ${{ matrix.dir }}/polyglot_benchmark_metadata.json
+      - uses: docker/login-action@v3
+        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
+      - name: Push (tag = official tag with ':latest' dropped)
+        working-directory: src
+        run: |
+          DEST=ghcr.io/${{ github.repository_owner }}/rethink-pb-${{ matrix.name }}
+          for t in $(python -c "import json;print(' '.join(json.load(open('pb_tags.json'))))"); do
+            nt="${t%:latest}"; nt="${nt//:/-}"
+            docker tag "$t" "$DEST:$nt"; docker push -q "$DEST:$nt"
+          done
+          docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep '^pb\.' | head -5
+      - name: Package prepared dataset
+        working-directory: src
+        run: |
+          tar czf ../polyglot-${{ matrix.name }}-${{ matrix.sha }}.tar.gz ${{ matrix.dir }}/polyglot-benchmark ${{ matrix.dir }}/polyglot_benchmark_metadata.json pb_tags.json
+          ls -la ..
+      - name: Publish dataset as release asset
+        env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+        run: |
+          TAG=polyglot-${{ matrix.name }}-${{ matrix.sha }}
+          gh release create "$TAG" -R ${{ github.repository }} --title "$TAG" --notes "Prepared Polyglot dataset for ${{ matrix.repo }}@${{ matrix.sha }} (upstream benchmark commit: $(cat benchmark_upstream_commit.txt))" polyglot-${{ matrix.name }}-${{ matrix.sha }}.tar.gz || \
+          gh release upload "$TAG" -R ${{ github.repository }} --clobber polyglot-${{ matrix.name }}-${{ matrix.sha }}.tar.gz
