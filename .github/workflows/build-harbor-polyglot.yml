@@ -87,3 +87,42 @@ jobs:
           docker tag final:local "$IMG"; docker push "$IMG"
           docker image inspect "$IMG" --format '{{.Size}}' | awk '{printf "size: %.2f GB\n", $1/1e9}'
           echo "pushed $IMG"
+
+  # The `select-harness` task of stanford-iris-lab/meta-harness (experimental/harbor_meta_harness) brings its own Dockerfile
+  # (python:3.12-slim + one file). Built unmodified from the pinned commit, plus the same Harbor server prerequisites.
+  select-harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PROJECT_SHA: 8123ccabe2b19fa1123090b2e5f1bacc20963ce8
+    steps:
+      - uses: actions/checkout@v4
+        with: {repository: stanford-iris-lab/meta-harness, ref: "${{ env.PROJECT_SHA }}", path: src}
+      - name: Build the task's Dockerfile and add the Harbor server prerequisites
+        run: |
+          CTX=src/experimental/harbor_meta_harness/tasks/select-harness/environment
+          cat "$CTX/Dockerfile"
+          docker build -t task:local "$CTX"
+          cat > Dockerfile.server <<'D'
+          FROM task:local
+          RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
+              && rm -rf /var/lib/apt/lists/*
+          RUN /usr/bin/python3 -m venv /opt/harbor-server && /opt/harbor-server/bin/python3 -m pip install --no-cache-dir uvicorn fastapi \
+              && chmod -R a+rX /opt/harbor-server
+          D
+          docker build -f Dockerfile.server -t final:local \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.description="select-harness task image of meta-harness ${PROJECT_SHA} for the Harbor singularity environment" .
+      - name: Check as an unprivileged user
+        run: |
+          docker run --rm --user 12345 final:local bash -c '
+            set -e
+            test -x /usr/bin/python3; command -v python; python --version
+            /opt/harbor-server/bin/python3 -c "import uvicorn, fastapi; print(\"server deps ok\")"
+            test -f /app/harness.py'
+      - uses: docker/login-action@v3
+        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
+      - name: Push
+        run: |
+          IMG=ghcr.io/${{ github.repository_owner }}/rethink-harbor-polyglot:select-harness-${PROJECT_SHA:0:12}
+          docker tag final:local "$IMG"; docker push "$IMG"; echo "pushed $IMG"
