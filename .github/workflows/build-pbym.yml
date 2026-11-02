@@ -1,6 +1,7 @@
 name: build-pbym-images
 # Images for "Predict Before You Modify" (arXiv 2610.13991). The official code is published only as an anonymous
-# mirror (no git), so it is fetched as a zip and checked against a pinned sha256.
+# mirror (no git), so it is fetched as a zip. The mirror builds the zip on every download (zip bytes differ), so the
+# pin is the sha256 over the sorted per-file sha256 list of the unpacked tree.
 #  - controller: experiments/coding/runtime/Dockerfile, built unmodified with its own folder as context
 #  - Polyglot evaluation images (base, env, one per exercise): the official dataset script and build functions,
 #    unchanged, with the two settings the official launcher sets (experiments/coding/runner.py:75:
@@ -14,25 +15,26 @@ permissions:
   packages: write
 env:
   ZIP_URL: https://anonymous.4open.science/api/repo/Predictive-self-evolution/zip
-  ZIP_SHA256: 04b2b1d4b15847ae8f490a717e0d59e59a5980712ce5c86e6d290267c9a42b48
+  TREE_SHA256: fb91fcb6795dd27a4a6538e8b0f653532a96613af1c5c40ee7206b5d831b958d
 jobs:
   controller:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Fetch the official code (sha256-checked)
+      - name: Fetch the official code (tree sha256-checked)
         run: |
           curl -sSL --retry 5 -o src.zip "$ZIP_URL"
-          echo "$ZIP_SHA256  src.zip" | sha256sum -c -
           mkdir src && cd src && unzip -q ../src.zip
+          got=$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
+          echo "tree sha256: $got"; [ "$got" = "$TREE_SHA256" ]
       - uses: docker/login-action@v3
         with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
       - name: Build and push the controller image
         run: |
-          IMG=ghcr.io/${{ github.repository_owner }}/rethink-pbym:${ZIP_SHA256}
+          IMG=ghcr.io/${{ github.repository_owner }}/rethink-pbym:${TREE_SHA256}
           docker build -t "$IMG" \
             --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
-            --label org.opencontainers.image.description="Unmodified experiments/coding/runtime/Dockerfile of Predictive-self-evolution (zip sha256 ${ZIP_SHA256})" \
+            --label org.opencontainers.image.description="Unmodified experiments/coding/runtime/Dockerfile of Predictive-self-evolution (tree sha256 ${TREE_SHA256})" \
             src/experiments/coding/runtime
           docker run --rm "$IMG" python -c "import sys, litellm; print(sys.version)"
           docker push "$IMG"
@@ -46,11 +48,12 @@ jobs:
           docker system prune -af; df -h /
       - uses: actions/checkout@v4
         with: {path: tools}
-      - name: Fetch the official code (sha256-checked)
+      - name: Fetch the official code (tree sha256-checked)
         run: |
           curl -sSL --retry 5 -o src.zip "$ZIP_URL"
-          echo "$ZIP_SHA256  src.zip" | sha256sum -c -
           mkdir src && cd src && unzip -q ../src.zip
+          got=$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
+          echo "tree sha256: $got"; [ "$got" = "$TREE_SHA256" ]
       - uses: actions/setup-python@v5
         with: {python-version: "3.13"}
       - name: Install (the packages the dataset and build steps import; no SWE-bench, which no Polyglot spec uses)
@@ -80,7 +83,7 @@ jobs:
         working-directory: src
         env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
         run: |
-          TAG=polyglot-pbym-${ZIP_SHA256}
+          TAG=polyglot-pbym-${TREE_SHA256}
           tar czf ../$TAG.tar.gz domains/polyglot/polyglot-benchmark domains/polyglot/polyglot_benchmark_metadata.json pb_tags.json
-          gh release create "$TAG" -R ${{ github.repository }} --title "$TAG" --notes "Prepared Polyglot dataset for Predictive-self-evolution (zip sha256 ${ZIP_SHA256})" ../$TAG.tar.gz || \
+          gh release create "$TAG" -R ${{ github.repository }} --title "$TAG" --notes "Prepared Polyglot dataset for Predictive-self-evolution (tree sha256 ${TREE_SHA256})" ../$TAG.tar.gz || \
           gh release upload "$TAG" -R ${{ github.repository }} --clobber ../$TAG.tar.gz
