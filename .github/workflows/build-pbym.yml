@@ -16,6 +16,7 @@ permissions:
 env:
   SOURCE: https://anonymous.4open.science/r/Predictive-self-evolution/
   TREE_SHA256: fb91fcb6795dd27a4a6538e8b0f653532a96613af1c5c40ee7206b5d831b958d
+  EXERCISES_SHA: 7e0611e77b54e2dea774cdc0aa00cf9f7ed6144f    # Aider-AI/polyglot-benchmark, as for the other systems
 jobs:
   controller:
     runs-on: ubuntu-latest
@@ -67,17 +68,26 @@ jobs:
         run: |
           git config --global user.email "ci@example.com"; git config --global user.name "ci"
           pip install docker GitPython unidiff rich tqdm python-dotenv chardet datasets
-      - name: Prepare dataset (official script, docs/reproduction.md)
-        working-directory: src
+      # docs/reproduction.md (Inputs, Coding): prepare in a disposable engine copy (runtime + agent/ + domains/polyglot).
+      # The exercises repo is cloned at the commit every other system uses; the official script skips its own clone of
+      # upstream HEAD when the directory exists.
+      - name: Disposable engine copy (official layout) with the pinned exercises
+        run: |
+          cp -R src/experiments/coding/runtime work; cp -R src/agent work/; mkdir -p work/domains; cp -R src/domains/polyglot work/domains/
+          git clone -q https://github.com/Aider-AI/polyglot-benchmark.git work/domains/polyglot/polyglot-benchmark
+          git -C work/domains/polyglot/polyglot-benchmark checkout -q "$EXERCISES_SHA"
+          git -C work/domains/polyglot/polyglot-benchmark rev-parse HEAD
+      - name: Prepare dataset (official script)
+        working-directory: work
         run: python -B -m domains.polyglot.prepare_polyglot_dataset
       - name: Build images (official build functions, launcher settings)
-        working-directory: src
+        working-directory: work
         env: {POLYGLOT_SANITIZE_DOMAINS: "1", POLYGLOT_EVALUATOR_VERSION: "v2"}
         run: PYTHONPATH=. python ../tools/scripts/build_polyglot.py domains.polyglot domains/polyglot/polyglot_benchmark_metadata.json
       - uses: docker/login-action@v3
         with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
       - name: Push (tag = official tag with ':latest' dropped)
-        working-directory: src
+        working-directory: work
         run: |
           DEST=ghcr.io/${{ github.repository_owner }}/rethink-pb-pbym
           for t in $(python -c "import json;print(' '.join(json.load(open('pb_tags.json'))))"); do
@@ -86,7 +96,7 @@ jobs:
           done
           docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' | grep '^pb\.' | head -5
       - name: Package and publish the prepared dataset
-        working-directory: src
+        working-directory: work
         env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
         run: |
           TAG=polyglot-pbym-${TREE_SHA256}
