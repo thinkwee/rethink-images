@@ -1,7 +1,7 @@
 name: build-pbym-images
 # Images for "Predict Before You Modify" (arXiv 2610.13991). The official code is published only as an anonymous
-# mirror (no git), so it is fetched as a zip. The mirror builds the zip on every download (zip bytes differ), so the
-# pin is the sha256 over the sorted per-file sha256 list of the unpacked tree.
+# mirror (no git), as a zip that the mirror rebuilds on every download (zip bytes differ), so the pin is the sha256
+# over the sorted per-file sha256 list of the unpacked tree.
 #  - controller: experiments/coding/runtime/Dockerfile, built unmodified with its own folder as context
 #  - Polyglot evaluation images (base, env, one per exercise): the official dataset script and build functions,
 #    unchanged, with the two settings the official launcher sets (experiments/coding/runner.py:75:
@@ -14,18 +14,20 @@ permissions:
   contents: write
   packages: write
 env:
-  ZIP_URL: https://anonymous.4open.science/api/repo/Predictive-self-evolution/zip
+  SOURCE: https://anonymous.4open.science/r/Predictive-self-evolution/
   TREE_SHA256: fb91fcb6795dd27a4a6538e8b0f653532a96613af1c5c40ee7206b5d831b958d
 jobs:
   controller:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Fetch the official code (tree sha256-checked)
+      # the mirror answers CI runners with a Cloudflare bot check ("Just a moment..."), so the zip downloaded from the
+      # mirror is kept in a private cache repository; the unpacked tree is still checked against the pinned sha256
+      - uses: actions/checkout@v4
+        with: {repository: thinkwee/rethink-src-cache, ssh-key: "${{ secrets.SRC_CACHE_SSH_KEY }}", path: cache}
+      - name: Unpack the official code (tree sha256-checked)
         run: |
-          curl -sSL --retry 5 -A "Mozilla/5.0 (X11; Linux x86_64)" -o src.zip "$ZIP_URL"
-          ls -la src.zip; file src.zip; head -c 300 src.zip | tr -c '[:print:]\n' '.'; echo
-          mkdir src && cd src && unzip -q ../src.zip
+          mkdir src && cd src && unzip -q ../cache/predictive-self-evolution.zip
           got=$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
           echo "tree sha256: $got"; [ "$got" = "$TREE_SHA256" ]
       - uses: docker/login-action@v3
@@ -49,11 +51,13 @@ jobs:
           docker system prune -af; df -h /
       - uses: actions/checkout@v4
         with: {path: tools}
-      - name: Fetch the official code (tree sha256-checked)
+      # the mirror answers CI runners with a Cloudflare bot check ("Just a moment..."), so the zip downloaded from the
+      # mirror is kept in a private cache repository; the unpacked tree is still checked against the pinned sha256
+      - uses: actions/checkout@v4
+        with: {repository: thinkwee/rethink-src-cache, ssh-key: "${{ secrets.SRC_CACHE_SSH_KEY }}", path: cache}
+      - name: Unpack the official code (tree sha256-checked)
         run: |
-          curl -sSL --retry 5 -A "Mozilla/5.0 (X11; Linux x86_64)" -o src.zip "$ZIP_URL"
-          ls -la src.zip; file src.zip; head -c 300 src.zip | tr -c '[:print:]\n' '.'; echo
-          mkdir src && cd src && unzip -q ../src.zip
+          mkdir src && cd src && unzip -q ../cache/predictive-self-evolution.zip
           got=$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
           echo "tree sha256: $got"; [ "$got" = "$TREE_SHA256" ]
       - uses: actions/setup-python@v5
