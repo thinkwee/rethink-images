@@ -23,7 +23,8 @@ jobs:
     steps:
       - name: Fetch the official code (tree sha256-checked)
         run: |
-          curl -sSL --retry 5 -o src.zip "$ZIP_URL"
+          curl -sSL --retry 5 -A "Mozilla/5.0 (X11; Linux x86_64)" -o src.zip "$ZIP_URL"
+          ls -la src.zip; file src.zip; head -c 300 src.zip | tr -c '[:print:]\n' '.'; echo
           mkdir src && cd src && unzip -q ../src.zip
           got=$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
           echo "tree sha256: $got"; [ "$got" = "$TREE_SHA256" ]
@@ -50,7 +51,8 @@ jobs:
         with: {path: tools}
       - name: Fetch the official code (tree sha256-checked)
         run: |
-          curl -sSL --retry 5 -o src.zip "$ZIP_URL"
+          curl -sSL --retry 5 -A "Mozilla/5.0 (X11; Linux x86_64)" -o src.zip "$ZIP_URL"
+          ls -la src.zip; file src.zip; head -c 300 src.zip | tr -c '[:print:]\n' '.'; echo
           mkdir src && cd src && unzip -q ../src.zip
           got=$(find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64)
           echo "tree sha256: $got"; [ "$got" = "$TREE_SHA256" ]
