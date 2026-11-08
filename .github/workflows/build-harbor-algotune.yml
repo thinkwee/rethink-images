@@ -1,0 +1,64 @@
+name: build-harbor-algotune-image
+# The task image of the AlgoTune tasks of laude-institute/harbor-datasets (dataset algotune 1.0). All 154 tasks share one Dockerfile
+# (python:3.12-slim, apt git / tmux / asciinema / build-essential, a pip install of the benchmark's packages) and name no prebuilt image.
+# It is built unmodified from the pinned commit, plus the same thin layer as the other Harbor images (python3-venv and the
+# /opt/harbor-server venv that Harbor's singularity environment would otherwise install at start with root).
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/build-harbor-algotune.yml"]
+permissions:
+  contents: read
+  packages: write
+env:
+  DATASETS_SHA: 479f07ddc302ea18ea05f03954effdb07411688b   # laude-institute/harbor-datasets
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af; df -h /
+      - uses: actions/checkout@v4
+        with:
+          repository: laude-institute/harbor-datasets
+          ref: "${{ env.DATASETS_SHA }}"
+          path: ds
+          sparse-checkout: datasets/algotune
+      - name: One Dockerfile for every task
+        run: |
+          n=$(ls ds/datasets/algotune/*/environment/Dockerfile | wc -l); echo "tasks: $n"
+          d=$(sha256sum ds/datasets/algotune/*/environment/Dockerfile | cut -d' ' -f1 | sort -u | wc -l); echo "distinct Dockerfiles: $d"; [ "$d" = 1 ]
+          F=$(ls ds/datasets/algotune/*/environment/Dockerfile | head -1)
+          echo "DSHA=$(sha256sum "$F" | cut -c1-12)" >> "$GITHUB_ENV"
+          mkdir ctx; cp "$F" ctx/Dockerfile; cat ctx/Dockerfile
+      - name: Build the task Dockerfile
+        run: docker build -t task:local ctx
+      - name: Add the Harbor server prerequisites
+        run: |
+          cat > Dockerfile.server <<'D'
+          FROM task:local
+          RUN apt-get update && apt-get install -y --no-install-recommends python3-venv ca-certificates && rm -rf /var/lib/apt/lists/*
+          RUN python3 -m venv /opt/harbor-server && /opt/harbor-server/bin/python3 -m pip install --no-cache-dir uvicorn fastapi \
+              && chmod -R a+rX /opt/harbor-server
+          D
+          docker build -f Dockerfile.server -t final:local \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.description="AlgoTune task image of harbor-datasets ${DATASETS_SHA} (its Dockerfile, unmodified) for the Harbor singularity environment" .
+      - name: Check as an unprivileged user
+        run: |
+          docker run --rm --user 12345 final:local bash -c '
+            set -e
+            command -v git gcc g++ make tmux asciinema; python3 --version
+            python3 -c "import numpy, scipy, cvxpy, torch, jax, numba, ortools, sklearn; print(\"packages ok\")"
+            /opt/harbor-server/bin/python3 -c "import uvicorn, fastapi; print(\"server deps ok\")"'
+      - uses: docker/login-action@v3
+        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
+      - name: Push
+        run: |
+          IMG=ghcr.io/${{ github.repository_owner }}/rethink-harbor-algotune:${DSHA}
+          docker tag final:local "$IMG"; docker push "$IMG"
+          docker image inspect "$IMG" --format '{{.Size}}' | awk '{printf "size: %.2f GB\n", $1/1e9}'
+          echo "pushed $IMG"
